@@ -1,0 +1,35 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app: {{ .Chart.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-sa
+      containers:
+        - name: webhook-redeploy
+          image: alpine/k8s:1.27.3
+          command: ["/bin/sh"]
+          args: ["/config/webhook.sh"]
+          volumeMounts:
+            - name: script
+              mountPath: /config
+              readOnly: true
+          ports:
+            - containerPort: 8080
+      volumes:
+        - name: script
+          configMap:
+            name: {{ .Release.Name }}-script
+            defaultMode: 0755
+{{- end }}

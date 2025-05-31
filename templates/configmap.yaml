@@ -1,0 +1,205 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-script
+data:
+  webhook.sh: |
+    #!/bin/ash
+    apk add --no-cache coreutils curl socat jq > /dev/null
+
+    timestamp() {
+      date '+[%Y-%m-%d %H:%M:%S]'
+    }
+
+    log() {
+      echo "$(timestamp) $1" >&2
+    }
+
+    get_deployment() {
+      deploy=$(kubectl get deploy -n "$1" -l app="$2" -o jsonpath="{.items[0].metadata.name}" 2>/dev/null)
+      if [ -z "$deploy" ]; then
+        matching_deploys=$(kubectl get deploy -n "$1" --no-headers -o custom-columns=":metadata.name" | grep -x "$2")
+        if [ "$(echo "$matching_deploys" | wc -l)" -eq 1 ]; then
+          deploy="$2"
+        fi
+      fi
+      if [ -z "$deploy" ]; then
+        log "Deployment not found in namespace '$1' with label app=$2 or name '$2'"
+        return 1
+      fi
+      echo "$deploy"
+      return 0
+    }
+
+    get_containers_info() {
+      kubectl get deploy "$1" -n "$2" -o json | jq -c '.spec.template.spec.containers'
+    }
+
+    patch_policy() {
+      kubectl patch deployment "$1" -n "$2" \
+        --type=json \
+        -p="[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers/$3/imagePullPolicy\", \"value\": \"$4\"}]" > /dev/null
+    }
+
+    force_rollout_restart() {
+      log "[$3] Adding restart annotation"
+      ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      kubectl patch deployment "$1" -n "$2" \
+        --type=json \
+        -p="[{\"op\": \"replace\", \"path\": \"/spec/template/metadata/annotations/redeployed-at\", \"value\": \"$ts\"}]" > /dev/null 2>&1 || \
+      kubectl patch deployment "$1" -n "$2" \
+        --type=json \
+        -p="[{\"op\": \"add\", \"path\": \"/spec/template/metadata/annotations\", \"value\": {\"redeployed-at\": \"$ts\"}}]" > /dev/null 2>&1 || \
+      kubectl patch deployment "$1" -n "$2" \
+        --type=merge \
+        -p="{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"redeployed-at\":\"$ts\"}}}}" > /dev/null 2>&1
+    }
+
+    wait_for_rollout() {
+      log "[$3] Waiting for rollout..."
+      kubectl rollout status deployment "$1" -n "$2" --timeout={{ .Values.webhook.timeout }} 2>&1 | while read -r line; do
+        log "[$3] $line"
+      done
+      kubectl rollout status deployment "$1" -n "$2" --timeout={{ .Values.webhook.timeout }} > /dev/null 2>&1
+      return $?
+    }
+
+    handle_redeploy() {
+      namespace="$1"
+      app="$2"
+      request_id="$3"
+      
+      log "[$request_id] Redeploying $app in $namespace"
+      
+      deploy=$(get_deployment "$namespace" "$app")
+      if [ $? -ne 0 ]; then
+        log "[$request_id] Failed to get deployment"
+        return 1
+      fi
+      
+      log "[$request_id] Deployment: $deploy"
+      
+      containers=$(get_containers_info "$deploy" "$namespace")
+      if [ $? -ne 0 ]; then
+        log "[$request_id] Failed to get containers info"
+        return 1
+      fi
+      
+      count=$(echo "$containers" | jq 'length')
+      log "[$request_id] $count container(s) found"
+      
+      # Save original policies
+      i=0
+      while [ $i -lt "$count" ]; do
+        name=$(echo "$containers" | jq -r ".[$i].name")
+        policy=$(echo "$containers" | jq -r ".[$i].imagePullPolicy")
+        eval "policy_${request_id}_$i=\"$policy\""
+        log "[$request_id] Container $name has policy: $policy"
+        
+        if [ "$policy" != "Always" ]; then
+          if ! patch_policy "$deploy" "$namespace" "$i" "Always"; then
+            log "[$request_id] Failed to patch policy for container $i"
+            return 1
+          fi
+        fi
+        i=$((i + 1))
+      done
+      
+      # Perform restart
+      if ! force_rollout_restart "$deploy" "$namespace" "$request_id"; then
+        log "[$request_id] Failed to force rollout restart"
+        return 1
+      fi
+      
+      # Wait for rollout
+      if ! wait_for_rollout "$deploy" "$namespace" "$request_id"; then
+        log "[$request_id] Rollout failed or timed out"
+        return 1
+      fi
+      
+      # Restore original policies
+      log "[$request_id] Restoring imagePullPolicy"
+      i=0
+      while [ $i -lt "$count" ]; do
+        orig_policy=$(eval "echo \$policy_${request_id}_$i")
+        if [ "$orig_policy" != "Always" ]; then
+          patch_policy "$deploy" "$namespace" "$i" "$orig_policy"
+        fi
+        i=$((i + 1))
+      done
+      
+      log "[$request_id] Done successfully."
+      return 0
+    }
+
+    start_server() {
+      socat TCP4-LISTEN:8080,reuseaddr,fork SYSTEM:"$0 handle"
+    }
+
+    send_response() {
+      local status_code="$1"
+      local message="$2"
+      
+      echo -e "HTTP/1.1 $status_code\r"
+      echo -e "Content-Type: text/plain\r"
+      echo -e "Content-Length: ${#message}\r"
+      echo -e "Connection: close\r"
+      echo -e "\r"
+      echo -n "$message"
+    }
+
+    handle_request() {
+      read method path protocol || exit 1
+      
+      content_length=0
+      
+      while read header; do
+        header=$(echo "$header" | tr -d '\r')
+        [ "$header" = "" ] && break
+        case "$header" in
+          Content-Length:*)
+            content_length=$(echo "$header" | cut -d' ' -f2)
+            ;;
+        esac
+      done
+      
+      if [ "$content_length" -gt 0 ]; then
+        dd bs=1 count="$content_length" 2>/dev/null >/dev/null
+      fi
+      
+      log "Received: $method $path"
+      
+      token=$(echo "$path" | cut -d'/' -f3)
+      namespace=$(echo "$path" | cut -d'/' -f4)
+      app=$(echo "$path" | cut -d'/' -f5)
+      
+      if [ "$method" = "POST" ] && [ "$token" = "{{ .Values.webhook.token }}" ]; then
+        if [ -z "$namespace" ] || [ -z "$app" ]; then
+          send_response "400 Bad Request" "Missing namespace or app parameter"
+          return
+        fi
+        
+        request_id=$(date +%s%N | cut -b1-13)
+        log "[$request_id] Starting redeploy for $app in $namespace"
+        
+        if handle_redeploy "$namespace" "$app" "$request_id"; then
+          send_response "200 OK" "Redeploy completed successfully"
+        else
+          send_response "500 Internal Server Error" "Redeploy failed"
+        fi
+      else
+        send_response "403 Forbidden" "Invalid token or method (should be POST)"
+      fi
+    }
+
+    case "$1" in
+      handle)
+        handle_request
+        ;;
+      *)
+        log "Starting HTTP server on port 8080"
+        start_server
+        ;;
+    esac
+{{- end }}
