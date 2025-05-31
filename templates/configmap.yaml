@@ -140,13 +140,17 @@ data:
     send_response() {
       local status_code="$1"
       local message="$2"
+
+      {
+        printf "HTTP/1.1 %s\r\n" "$status_code"
+        printf "Content-Type: text/plain\r\n"
+        printf "Content-Length: %s\r\n" "${#message}"
+        printf "Connection: close\r\n"
+        printf "\r\n"
+        printf "%s" "$message"
+      } 2>/dev/null
       
-      echo -e "HTTP/1.1 $status_code\r"
-      echo -e "Content-Type: text/plain\r"
-      echo -e "Content-Length: ${#message}\r"
-      echo -e "Connection: close\r"
-      echo -e "\r"
-      echo -n "$message"
+      sleep 0.1
     }
 
     handle_request() {
@@ -185,8 +189,10 @@ data:
         
         if handle_redeploy "$namespace" "$app" "$request_id"; then
           send_response "200 OK" "Redeploy completed successfully"
+          log "[$request_id] Response sent successfully"
         else
           send_response "500 Internal Server Error" "Redeploy failed"
+          log "[$request_id] Error response sent"
         fi
       else
         send_response "403 Forbidden" "Invalid token or method (should be POST)"
