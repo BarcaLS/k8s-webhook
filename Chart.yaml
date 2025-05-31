@@ -5,9 +5,6 @@ description: |
     Lightweight HTTP webhook server to trigger Kubernetes deployment rollouts
   Syntax:
     curl --fail -X POST http://{$CLUSTER}/webhook-redeploy/${TOKEN}/${NAMESPACE}/${APP_NAME}
-  Usage examples:
-    curl --fail -X POST http://rancher.premotec-services.com/webhook-redeploy/a9FvT3kLmQzR1xYpWcNbG7dLpZ2wXmTaKq8vNfEy/client-pmt/foodcase-test
-    curl --fail -X POST http://minikube/webhook-redeploy/a9FvT3kLmQzR1xYpWcNbG7dLpZ2wXmTaKq8vNfEy/simple-nginx/simple-nginx
 type: application
 version: 0.4.6
 appVersion: 4.0.0
