@@ -1,0 +1,10 @@
+apiVersion: v2
+name: k8s-webhook
+description: |
+  What is it?
+    Lightweight HTTP webhook server to trigger Kubernetes deployment rollouts
+  Syntax:
+    curl -fail -X POST http://{$CLUSTER}/webhook-redeploy/${TOKEN}/${NAMESPACE}/${APP_NAME}
+type: application
+version: 0.4.1
+appVersion: 4.0.0

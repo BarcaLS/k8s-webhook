@@ -1,0 +1,7 @@
+replicaCount: 1
+webhook:
+  enabled: true
+  host: my.domain.com
+  path: webhook-redeploy
+  timeout: 300s
+  token: dfsp3i9sdfu8uwfYh&34
